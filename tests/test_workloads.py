@@ -173,6 +173,88 @@ class WorkloadTests(unittest.TestCase):
         else:
             release_pin.load_pin()
 
+    def update_release(self, current=None, release_changes=None, checksum=None):
+        path = self.directory / "release.json"
+        pin = {"repository": "example/fabric-date-library", "tag": "v0.1.0",
+               "asset": "demo_date-0.1.0-py3-none-any.whl", "sha256": ""}
+        path.write_text(json.dumps({**pin, **(current or {})}))
+        release = {"tagName": "v0.1.0", "isDraft": False, "isPrerelease": False,
+                   "assets": [{"name": pin["asset"]}, {"name": "SHA256SUMS"}]}
+        release.update(release_changes or {})
+        wheel, digest = make_wheel(self.directory)
+        wheel_bytes = wheel.read_bytes()
+
+        def run(command, **kwargs):
+            if command[2] == "view":
+                return Mock(stdout=json.dumps(release))
+            directory = Path(command[command.index("--dir") + 1])
+            (directory / wheel.name).write_bytes(wheel_bytes)
+            (directory / "SHA256SUMS").write_text(
+                f"{checksum if checksum is not None else digest}  {wheel.name}\n")
+            return Mock()
+
+        return path, run
+
+    def test_update_pin_verifies_published_wheel_and_is_idempotent(self):
+        path, run = self.update_release()
+        with patch.object(release_pin.subprocess, "run", side_effect=run) as command:
+            pin = release_pin.update_pin("v0.1.0", path)
+            self.assertEqual(release_pin.load_pin(path), pin)
+            self.assertEqual(command.call_args_list[0].args[0][5], pin["repository"])
+            before = path.read_bytes()
+            release_pin.update_pin("v0.1.0", path)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_update_pin_upgrades_an_existing_complete_pin(self):
+        path, run = self.update_release(current={
+            "tag": "v0.0.9", "asset": "demo_date-0.0.9-py3-none-any.whl", "sha256": "a" * 64,
+        })
+        with patch.object(release_pin.subprocess, "run", side_effect=run):
+            pin = release_pin.update_pin("v0.1.0", path)
+        self.assertEqual(pin["tag"], "v0.1.0")
+        self.assertEqual(release_pin.load_pin(path), pin)
+
+    def test_update_pin_download_failure_preserves_current_pin(self):
+        path, run = self.update_release()
+        before = path.read_bytes()
+
+        def fail_download(command, **kwargs):
+            if command[2] == "download":
+                raise release_pin.subprocess.CalledProcessError(1, command)
+            return run(command, **kwargs)
+
+        with patch.object(release_pin.subprocess, "run", side_effect=fail_download):
+            with self.assertRaises(release_pin.subprocess.CalledProcessError):
+                release_pin.update_pin("v0.1.0", path)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_update_pin_rejects_untrusted_releases_without_writing(self):
+        for changes in [{"isDraft": True}, {"isPrerelease": True},
+                        {"tagName": "v0.2.0"}, {"assets": []}]:
+            with self.subTest(changes=changes):
+                path, run = self.update_release(release_changes=changes)
+                before = path.read_bytes()
+                with patch.object(release_pin.subprocess, "run", side_effect=run), self.assertRaises(ValueError):
+                    release_pin.update_pin("v0.1.0", path)
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_update_pin_rejects_bad_checksums_and_replaced_assets(self):
+        for current, checksum in [({}, "0" * 64), ({}, "invalid"),
+                                  ({"sha256": "a" * 64}, None)]:
+            path, run = self.update_release(current=current, checksum=checksum)
+            before = path.read_bytes()
+            with patch.object(release_pin.subprocess, "run", side_effect=run), self.assertRaises(ValueError):
+                release_pin.update_pin("v0.1.0", path)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_update_pin_rejects_invalid_tags_and_downgrades_before_download(self):
+        path, run = self.update_release(current={"tag": "v0.2.0"})
+        with patch.object(release_pin.subprocess, "run", side_effect=run) as command:
+            for tag in ["v0.1.0", "v1.0.0-rc1", "--bad"]:
+                with self.assertRaises(ValueError):
+                    release_pin.update_pin(tag, path)
+            command.assert_not_called()
+
     def test_workflows_are_parseable_and_use_oidc(self):
         for path in (ROOT / ".github/workflows").glob("*.yml"):
             workflow = yaml.safe_load(path.read_text())
@@ -188,6 +270,41 @@ class WorkloadTests(unittest.TestCase):
         workflow = load_workflow("ci.yml")
         self.assertEqual(set(workflow["on"]), {"push", "pull_request"})
         self.assertEqual(workflow["on"]["push"]["branches"], ["dev"])
+
+    def test_pin_update_workflow_opens_reviewed_dev_pr_without_deployment(self):
+        workflow = load_workflow("update-pin.yml")
+        self.assertEqual(set(workflow["on"]), {"workflow_dispatch"})
+        self.assertEqual(workflow["on"]["workflow_dispatch"]["inputs"]["tag"], {
+            "description": "Published stable library tag (vX.Y.Z)",
+            "required": "true", "type": "string",
+        })
+        self.assertEqual(workflow["permissions"], {"contents": "read"})
+        self.assertEqual(workflow["concurrency"], {
+            "group": "library-release-pin", "cancel-in-progress": "false",
+        })
+        self.assertEqual(set(workflow["jobs"]), {"update-pin"})
+        job = workflow["jobs"]["update-pin"]
+        self.assertEqual(job["if"], "github.ref == 'refs/heads/main'")
+        steps = job["steps"]
+        checkout = next(step for step in steps if step.get("uses") == "actions/checkout@v4")
+        self.assertEqual(checkout["with"], {"ref": "dev", "persist-credentials": "false"})
+        update = next(step for step in steps if step.get("name") == "Update pin from verified published assets")
+        self.assertEqual(update["env"], {
+            "GH_TOKEN": "${{ secrets.GH_RELEASE_TOKEN || github.token }}",
+            "RELEASE_TAG": "${{ inputs.tag }}",
+        })
+        self.assertEqual(update["run"], 'python scripts/release_pin.py --update-tag "$RELEASE_TAG"')
+        pr = next(step for step in steps if step.get("uses") == "peter-evans/create-pull-request@v7")
+        self.assertEqual(pr["with"]["token"], "${{ secrets.PIN_PR_TOKEN }}")
+        self.assertEqual(pr["with"]["base"], "dev")
+        self.assertEqual(pr["with"]["branch"],
+                 "automation/library-release-pin/${{ steps.pin.outputs.tag }}")
+        self.assertEqual(pr["with"]["add-paths"], "release.json")
+        self.assertLess(steps.index(update), steps.index(pr))
+        test = next(step for step in steps if step.get("name") == "Test proposed pin")
+        self.assertLess(steps.index(test), steps.index(pr))
+        self.assertNotIn("environment", job)
+        self.assertNotIn("deploy.py", "\n".join(step.get("run", "") for step in steps))
 
     def test_deploy_supports_reuse_and_manual_stage_scope_selection(self):
         workflow = load_workflow("deploy.yml")

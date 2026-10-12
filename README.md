@@ -50,9 +50,10 @@ notebook; Python 3.11 runs the deployment tooling in GitHub Actions.
 7. Require reviewer approval on **test/prod**; restrict deployment branches
    and dispatch access to trusted refs. A push to `main` starts test/prod
    promotion, so merge only reviewed changes into protected `main`.
-8. Update `release.json`: replace `YOUR_OWNER`, set the released tag/asset,
-   and fill `sha256` with the **actual published wheel** checksum verified
-   from the release. Commit and review this pin.
+8. Configure the automatic pin PR below, or update `release.json` manually:
+   replace `YOUR_OWNER`, set the released tag/asset, and fill `sha256` with
+   the **actual published wheel** checksum verified from the release.
+   Review and merge the pin PR into `dev` before deploying.
    A local build's SHA can differ from a later GitHub build. The blank
    template deliberately blocks deployment; CI still runs offline.
 9. For a private library in a separate repo, add optional repository secret
@@ -132,9 +133,10 @@ Fabric smoke test.
 
 ### Library-only change (no notebook source edits)
 
-Release a new library tag, verify its published wheel, change only `release.json`
-here to the new tag/asset/hash, and commit on `dev`. Once the notebook/binding
-exists, manually deploy to dev with **environment** scope and smoke-test.
+Release a new library tag. The configured automation verifies its published
+wheel and opens a PR changing only `release.json` to the new tag/asset/hash.
+Review and merge into `dev`. Once the notebook/binding exists, manually deploy
+to dev with **environment** scope and smoke-test.
 Merging into `main` follows the same test/prod promotion process, using **all**.
 
 Environment-only deployment remains a manual option for any stage: it stages
@@ -142,10 +144,43 @@ only the Environment and does not republish notebooks. Initial deployment must
 use **all** to create the notebook/binding. Existing Spark sessions may retain
 the old library; restart them.
 
-The library release workflow intentionally does **not** auto-dispatch this
-repository. Reviewing and committing the release pin here is the explicit
-promotion boundary. Dev deployment is manual; test/prod promotion starts
-when that reviewed change reaches `main`.
+The library release workflow dispatches only the pin-update workflow, never
+deployment. Reviewing and merging the release pin is the explicit promotion
+boundary. Dev deployment is manual; test/prod promotion starts when that
+reviewed change reaches `main`.
+
+### Automatic pin PR setup
+
+1. Publish these workflow/script changes on `main` in both repositories and
+   bring the workload changes onto `dev`. The update workflow runs from `main`
+   and checks out `dev`; that branch must exist and contain the updater.
+2. In **fabric-wheel-workloads**, set secret `PIN_PR_TOKEN` to a fine-grained
+   PAT with **Contents: read/write** and **Pull requests: read/write** for
+   this repository. Use a PAT (or a suitable GitHub App token), not the default
+   `GITHUB_TOKEN`, so the generated PR triggers **Offline CI**. The token's
+   identity must have access to the repository. Keep branch review protections.
+3. In **fabric-date-library**, set repository variable `WORKLOADS_REPOSITORY`
+   to `zevanreg/fabric-wheel-workloads` and secret `WORKLOADS_DISPATCH_TOKEN`
+   to a fine-grained PAT with **Actions: read/write** for the workload repo.
+   The library token only dispatches the workflow; it does not write the pin.
+4. For a private library, configure `GH_RELEASE_TOKEN` here as described above.
+   Downloads use that token; PR writes use the separate `PIN_PR_TOKEN`.
+5. Push a new library release tag. After successful publication, the library
+   dispatches **Update library release pin**. For an already published release
+   (including `v0.1.0`), run that workflow manually on `main` with its exact tag.
+
+The updater accepts only stable published `vX.Y.Z` releases from the repository
+already configured in `release.json`. It verifies `SHA256SUMS`, the downloaded
+wheel's hash and package metadata, then runs offline tests before opening a
+pin-only PR against `dev`. PR branches are `automation/library-release-pin/vX.Y.Z`;
+repeating a tag updates the same PR or does nothing if already pinned. It rejects
+downgrades and changed assets for an already pinned tag. Updates are serialized;
+there is no auto-merge, deployment, or Azure authentication. Check both workflow
+runs if dispatch or PR creation fails; a dispatch failure does not undo publication.
+
+This automation does not bypass review: a checksum supplied by the same release
+verifies consistency, not independent trust in its publisher. Keep release
+protections, immutable assets, and review the resulting pin before merging.
 
 ### Notebook change / rollback
 
