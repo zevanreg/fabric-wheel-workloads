@@ -1,0 +1,11 @@
+find_replace:
+  - find_value: "ac83b218-1fa9-4d7b-a40b-3188ec1c61ae"
+    replace_value:
+      _ALL_: "$items.Environment.DateDemoEnvironment.$id"
+    item_type: Notebook
+    item_name: PrintCurrentDateWheel
+  - find_value: "00000000-0000-0000-0000-000000000000"
+    replace_value:
+      _ALL_: "$workspace.$id"
+    item_type: Notebook
+    item_name: PrintCurrentDateWheel

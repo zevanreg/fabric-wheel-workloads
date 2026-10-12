@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "PrintCurrentDateWheel",
+    "description": "Print today's UTC date using the demo-date wheel."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "d71f8a7c-fd22-4771-8d21-0242a552a509"
+  }
+}

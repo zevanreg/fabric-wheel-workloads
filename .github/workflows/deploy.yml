@@ -1,0 +1,92 @@
+name: Deploy pinned wheel workloads
+on:
+  workflow_call:
+    inputs:
+      stage:
+        required: true
+        type: string
+      scope:
+        required: false
+        type: string
+        default: all
+    secrets:
+      GH_RELEASE_TOKEN:
+        required: false
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: Target workspace stage
+        required: true
+        type: choice
+        options: [dev, test, prod]
+      scope:
+        description: Use all initially; environment for library-only updates
+        required: true
+        type: choice
+        default: all
+        options: [all, environment]
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: fabric-wheel-${{ inputs.stage }}
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: ${{ inputs.stage }}
+    env:
+      STAGE: ${{ inputs.stage }}
+      SCOPE: ${{ inputs.scope }}
+      FABRIC_WORKSPACE_ID: ${{ vars.FABRIC_WORKSPACE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - name: Validate committed release pin
+        id: pin
+        run: python scripts/release_pin.py
+      - name: Download approved release wheel
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_RELEASE_TOKEN || github.token }}
+          LIBRARY_REPOSITORY: ${{ steps.pin.outputs.repository }}
+          LIBRARY_TAG: ${{ steps.pin.outputs.tag }}
+          WHEEL_ASSET: ${{ steps.pin.outputs.asset }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$LIBRARY_REPOSITORY/releases/tags/$LIBRARY_TAG" > release-info.json
+          python -c 'import json; r=json.load(open("release-info.json")); assert not r["draft"] and not r["prerelease"], "Only stable, published releases are accepted"'
+          gh release download "$LIBRARY_TAG" --repo "$LIBRARY_REPOSITORY" --pattern "$WHEEL_ASSET" --dir artifacts
+      - name: Validate wheel before authentication
+        env:
+          WHEEL_ASSET: ${{ steps.pin.outputs.asset }}
+          WHEEL_SHA256: ${{ steps.pin.outputs.sha256 }}
+        run: python scripts/deploy.py --stage "$STAGE" --scope "$SCOPE" --wheel "artifacts/$WHEEL_ASSET" --sha256 "$WHEEL_SHA256" --dry-run
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Publish environment and notebook
+        env:
+          WHEEL_ASSET: ${{ steps.pin.outputs.asset }}
+          WHEEL_SHA256: ${{ steps.pin.outputs.sha256 }}
+        run: python scripts/deploy.py --stage "$STAGE" --scope "$SCOPE" --wheel "artifacts/$WHEEL_ASSET" --sha256 "$WHEEL_SHA256"
+      - name: Keep deployment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-${{ inputs.stage }}-${{ github.run_id }}
+          path: |
+            deployment-manifest.json
+            release.json
+            release-info.json
+          if-no-files-found: warn

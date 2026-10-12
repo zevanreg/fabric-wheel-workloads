@@ -1,0 +1,21 @@
+name: Promote on main
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  test:
+    uses: ./.github/workflows/deploy.yml
+    with:
+      stage: test
+    secrets:
+      GH_RELEASE_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+  prod:
+    needs: test
+    uses: ./.github/workflows/deploy.yml
+    with:
+      stage: prod
+    secrets:
+      GH_RELEASE_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Environment",
+    "displayName": "DateDemoEnvironment",
+    "description": "Pinned demo-date wheel for the UTC date notebook."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "ac83b218-1fa9-4d7b-a40b-3188ec1c61ae"
+  }
+}
